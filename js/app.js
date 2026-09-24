@@ -32,8 +32,9 @@ function counts(state, today) {
   }
 }
 
-function Nav({ page, go, script, setScript }) {
+function Nav({ page, go, script, setScript, fresh }) {
   const items = [
+    ...(fresh ? [['welcome', 'Welcome']] : []),
     ['home', 'Desk'],
     ['review', 'Review'],
     ['write', 'Write'],
@@ -88,6 +89,57 @@ function LevelToggles({ state, setState }) {
   }))
 }
 
+const WATCH = [
+  { href: 'https://www.youtube.com/watch?v=YW2_0dSfl2U&list=PLcnpIYbt022Eh0gtj8bDA1P9iigBqiIrm', title: 'Learning Chinese with a Game-Based Memory Palace', who: 'Language Arts with Adam', note: 'A series. Episode 1 builds a palace inside a video game world. Follow along if you want one worked example from the ground up.' },
+  { href: 'https://youtu.be/_qGjfSrQH4Y', title: 'How to Use Memory Palaces to Learn Chinese', who: 'Mullen Memory', note: 'The system in practice: how characters, sounds, and tones get placed.' },
+  { href: 'https://www.youtube.com/watch?v=yr_ziNyAURc', title: 'Simple Mandarin Memory Palace (how to)', who: 'Barry Allan, Mandarin Mnemonics', note: 'A short, plain version if you want to start today.' },
+]
+
+/** Shown while the database has no progress: no paragraphs, no reviews. */
+function Welcome({ go, setFocus, state }) {
+  const script = useContext(ScriptCtx)
+  const first = nextToWrite(state, 1)[0]
+  return h('div', { class: 'welcome' },
+    h('h2', null, 'Welcome'),
+    h('p', null,
+      'Hanzi Palace is a place to keep a memory palace for Chinese characters. It gives you the order and the review schedule. The palace itself is yours.'),
+    h('h3', null, 'What a memory palace is'),
+    h('p', null,
+      'A memory palace is a place you already know well, used as a filing system. Your childhood home, your walk to work, a level of a game you have played a hundred times. You pick a route through it and put one thing you want to remember at each spot along the way, as a vivid scene. To recall, you walk the route again and the scenes are waiting.'),
+    h('p', null,
+      'It works because places are what human memory is best at. You do not have to try to remember where the kitchen is. Attach a character to the kitchen with a scene that is strange, loud, funny, or moving, and the character comes back with the kitchen.'),
+    h('h3', null, 'How people use it for hanzi'),
+    h('ul', null,
+      h('li', null, h('b', null, 'Pick a place.'), ' Real or fictional, as long as you can walk it in your head without effort.'),
+      h('li', null, h('b', null, 'One character, one spot.'), ' Put the character at a stop on your route. Build a scene there from its pieces: 好 is a woman and a child at your front door.'),
+      h('li', null, h('b', null, 'Give the sound a body.'), ' Many people turn each pinyin syllable, or each initial and final, into a recurring person or object, and each tone into a mood or light. Some do not. Both work.'),
+      h('li', null, h('b', null, 'Words are scenes cut together.'), ' 出租车 is the scenes for 出, 租, and 车 meeting. That is why this app asks for the characters first.'),
+      h('li', null, h('b', null, 'Write it down.'), ' A paragraph per item. Reread it on review until you no longer need to.'),
+    ),
+    h('h3', null, 'Watch before you start'),
+    h('ul', { class: 'watch' }, WATCH.map((v) =>
+      h('li', { key: v.href },
+        h('a', { href: v.href, target: '_blank', rel: 'noopener' }, v.title),
+        h('span', { class: 'small mute' }, ' · ', v.who),
+        h('p', { class: 'small mute' }, v.note),
+      ),
+    )),
+    h('h3', null, 'How this app fits'),
+    h('ol', { class: 'small' },
+      h('li', null, 'Each HSK level is ordered by how often its characters appear in modern Chinese, so the first rooms hold the characters you will meet most.'),
+      h('li', null, 'A word is offered only after each of its characters has a paragraph.'),
+      h('li', null, 'Write as many paragraphs in a day as you like. Each one enters review as soon as it is saved.'),
+      h('li', null, 'Review shows the hanzi first. Walk to its spot, recall, reveal, rate. FSRS-5 picks the next date.'),
+      h('li', null, 'Everything stays in a local SQLite file on this machine.'),
+    ),
+    h('div', { class: 'row' },
+      first && h('button', { onClick: () => { setFocus(first.hz); go('edit') } }, 'Write the first paragraph: ' + showHz(first.hz, script)),
+      h('button', { class: 'ghost', onClick: () => go('write') }, 'See the order'),
+      h('button', { class: 'ghost', onClick: () => go('home') }, 'Skip to the desk'),
+    ),
+  )
+}
+
 function Home({ state, go, setState, setFocus }) {
   const script = useContext(ScriptCtx)
   const today = unixDay()
@@ -109,6 +161,7 @@ function Home({ state, go, setState, setFocus }) {
     ),
     h('p', { class: 'small mute' }, 'Lists stack. HSK 1 is on.'),
     h(LevelToggles, { state, setState }),
+    h('p', { class: 'small mute' }, h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('welcome') } }, 'What a memory palace is, and videos to follow along')),
     h('h2', null, 'How it works'),
     h('ol', { class: 'small' },
       h('li', null, 'Each HSK level is ordered by how often its characters appear in modern Chinese.'),
@@ -492,6 +545,7 @@ function App() {
       if (!live) return
       setStateRaw(r.state)
       setDbPath(r.db)
+      if (!Object.keys(r.state.c || {}).length) setPage('welcome')
     }).catch((err) => {
       if (!live) return
       setStateRaw(emptyState())
@@ -515,13 +569,15 @@ function App() {
 
   if (!state) return h('p', { class: 'mute' }, 'Opening local database…')
 
+  const fresh = !Object.keys(state.c).length
   const setScript = (next) => setState({ ...state, script: next })
   const go = (p) => { setPage(p); if (typeof window !== 'undefined') window.scrollTo(0, 0) }
 
   return h(ScriptCtx.Provider, { value: script },
     h('div', null,
-      h(Nav, { page, go, script, setScript }),
+      h(Nav, { page, go, script, setScript, fresh }),
       saveError && page !== 'review' && h('p', { class: 'warn' }, saveError),
+      page === 'welcome' && h(Welcome, { state, go, setFocus }),
       page === 'home' && h(Home, { state, go, setState, setFocus }),
       page === 'review' && h(Review, { state, setState, saveError, go, setFocus }),
       page === 'write' && h(Write, { state, setState, go, setFocus }),

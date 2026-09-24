@@ -173,3 +173,9 @@ textarea.story { min-height: 9rem; }
 .parts summary { cursor: pointer; }
 .list li.locked { opacity: 0.55; cursor: default; }
 .list li { cursor: pointer; }
+.welcome h3 { margin: 1.25rem 0 0.35rem; font-size: 1.05rem; }
+.welcome p, .welcome li { line-height: 1.5; }
+.welcome ul.watch { list-style: none; padding: 0; }
+.welcome ul.watch li { margin: 0 0 0.75rem; }
+.welcome ul.watch li p { margin: 0.15rem 0 0; }
+.welcome a { color: var(--ink); }
