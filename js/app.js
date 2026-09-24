@@ -378,13 +378,14 @@ function Write({ state, setState, go, setFocus }) {
   const script = useContext(ScriptCtx)
   const [q, setQ] = useState('')
   const [mode, setMode] = useState('next')
+  const [limit, setLimit] = useState(40)
   const needle = q.trim().toLowerCase()
   const pool = useMemo(() => itemsIn(state), [state.lv])
   function match(it) {
     if (!needle) return true
     return it.hz.includes(needle) || showHz(it.hz, 't').includes(needle) || it.py.toLowerCase().includes(needle) || (it.en || '').toLowerCase().includes(needle)
   }
-  const next = useMemo(() => nextToWrite(state, 40), [state])
+  const next = useMemo(() => nextToWrite(state, limit), [state, limit])
   const todo = useMemo(() => unwritten(state).filter(match), [state, needle])
   const done = useMemo(() => written(state).filter(match), [state, needle])
 
@@ -419,8 +420,12 @@ function Write({ state, setState, go, setFocus }) {
       onInput: (e) => setQ(e.target.value),
     }),
     mode === 'next' && h('div', null,
-      h('p', { class: 'small mute' }, next.length ? `${todo.length} left in the added lists. First ${next.length} in order:` : 'Every added list is written. Add a list above.'),
+      h('p', { class: 'small mute' }, next.length ? `${todo.length} left in the added lists. Showing the first ${next.length} in order.` : 'Every added list is written. Add a list above.'),
       h('ul', { class: 'list' }, next.map(row)),
+      next.length < todo.length && h('div', { class: 'row' },
+        h('button', { class: 'ghost', onClick: () => setLimit(limit + 40) }, 'Show 40 more'),
+        h('button', { class: 'ghost', onClick: () => setMode('all') }, 'Everything left'),
+      ),
     ),
     mode === 'all' && h('div', null,
       h('p', { class: 'small mute' }, todo.length, ' left'),
