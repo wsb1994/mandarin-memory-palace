@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Local Hanzi Stage server: static files + SQLite progress.
+"""Local Hanzi Palace server: static files + SQLite progress.
 
-Progress lives in ~/.local/share/hanzi-stage/progress.sqlite so shot text
-is not capped at a 4 KiB cookie. Bind 127.0.0.1 only.
+Progress lives in ~/.local/share/hanzi-stage/palace.sqlite. Cards are keyed by
+hanzi and each carries one paragraph. An older progress.sqlite (v1 shot desk)
+is offered to the client once, while palace.sqlite is still empty, so the
+client can convert it. Bind 127.0.0.1 only.
 """
 
 from __future__ import annotations
@@ -10,26 +12,27 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DB_DIR = Path.home() / ".local" / "share" / "hanzi-stage"
-DB_PATH = DB_DIR / "progress.sqlite"
+DB_PATH = DB_DIR / "palace.sqlite"
+LEGACY_PATH = DB_DIR / "progress.sqlite"
 HOST = os.environ.get("HANZI_STAGE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HANZI_STAGE_PORT", "4173"))
-MAX_BODY = 8 * 1024 * 1024
+MAX_BODY = 16 * 1024 * 1024
 
 _lock = threading.Lock()
 
 
-def _connect() -> sqlite3.Connection:
+def _connect(path: Path = DB_PATH) -> sqlite3.Connection:
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(DB_PATH), timeout=10)
+    con = sqlite3.connect(str(path), timeout=10)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA foreign_keys=ON")
     return con
 
 
@@ -42,16 +45,11 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS meta (
                   id INTEGER PRIMARY KEY CHECK (id = 1),
                   v INTEGER NOT NULL,
-                  new_cap INTEGER NOT NULL,
-                  day INTEGER NOT NULL,
-                  new_today INTEGER NOT NULL,
                   script TEXT NOT NULL,
-                  lv TEXT NOT NULL,
-                  extra TEXT NOT NULL,
-                  maps TEXT
+                  lv TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS cards (
-                  id INTEGER PRIMARY KEY,
+                  hz TEXT PRIMARY KEY,
                   s REAL,
                   d REAL,
                   due INTEGER,
@@ -59,7 +57,7 @@ def init_db() -> None:
                   lapses INTEGER,
                   st INTEGER,
                   last INTEGER,
-                  shot TEXT
+                  story TEXT
                 );
                 """
             )
@@ -73,7 +71,7 @@ def _unwrap(payload: object) -> dict:
         raise ValueError("expected a JSON object")
     if isinstance(payload.get("state"), dict) and payload.get("v") is None:
         payload = payload["state"]
-    if payload.get("v") != 1:
+    if payload.get("v") != 2:
         raise ValueError("unknown version")
     if not isinstance(payload.get("c"), dict):
         raise ValueError("missing cards")
@@ -89,67 +87,42 @@ def _lv(raw) -> list[int]:
             i = int(n)
         except (TypeError, ValueError):
             continue
-        if 1 <= i <= 6:
+        if 1 <= i <= 6 and i not in out:
             out.append(i)
-    return out or [1]
+    return sorted(out) or [1]
 
 
-def _extra(raw) -> list[int]:
-    if not isinstance(raw, list):
-        return []
-    out = []
-    for n in raw:
-        try:
-            i = int(n)
-        except (TypeError, ValueError):
-            continue
-        if i >= 0:
-            out.append(i)
-    return out
+def _num(v):
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return float(v) if isinstance(v, float) else int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def put_state(payload: object) -> dict:
     data = _unwrap(payload)
     script = "t" if data.get("script") == "t" else "s"
     lv = _lv(data.get("lv"))
-    extra = _extra(data.get("x"))
-    maps = data.get("maps")
-    maps_json = json.dumps(maps, ensure_ascii=False) if maps else None
-    try:
-        new_cap = int(data.get("newCap") or 7)
-    except (TypeError, ValueError):
-        new_cap = 7
-    new_cap = max(1, min(30, new_cap))
-    try:
-        day = int(data.get("day") or 0)
-    except (TypeError, ValueError):
-        day = 0
-    try:
-        new_today = int(data.get("newToday") or 0)
-    except (TypeError, ValueError):
-        new_today = 0
 
     cards = []
-    for key, card in data["c"].items():
-        try:
-            cid = int(key)
-        except (TypeError, ValueError):
+    for hz, card in data["c"].items():
+        if not isinstance(hz, str) or not hz or not isinstance(card, dict):
             continue
-        if not isinstance(card, dict):
-            continue
-        shot = card.get("m")
-        shot_json = json.dumps(shot, ensure_ascii=False) if shot is not None else None
+        story = card.get("p")
+        story = story if isinstance(story, str) and story.strip() else None
         cards.append(
             (
-                cid,
-                card.get("s"),
-                card.get("d"),
-                card.get("due"),
-                card.get("reps"),
-                card.get("lapses"),
-                card.get("st"),
-                card.get("last"),
-                shot_json,
+                hz,
+                _num(card.get("s")),
+                _num(card.get("d")),
+                _num(card.get("due")),
+                _num(card.get("reps")),
+                _num(card.get("lapses")),
+                _num(card.get("st")),
+                _num(card.get("last")),
+                story,
             )
         )
 
@@ -158,22 +131,18 @@ def put_state(payload: object) -> dict:
         try:
             existing = con.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
             if not cards and existing:
-                # An empty PUT is how a stale tab can wipe a just-migrated desk.
-                # Explicit wipe is DELETE /api/state.
+                # An empty PUT is how a stale tab can wipe a desk. Explicit wipe is DELETE.
                 raise ValueError("refusing to overwrite progress with empty cards")
             con.execute("BEGIN")
             con.execute("DELETE FROM cards")
             con.execute("DELETE FROM meta")
             con.execute(
-                """
-                INSERT INTO meta (id, v, new_cap, day, new_today, script, lv, extra, maps)
-                VALUES (1, 1, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (new_cap, day, new_today, script, json.dumps(lv), json.dumps(extra), maps_json),
+                "INSERT INTO meta (id, v, script, lv) VALUES (1, 2, ?, ?)",
+                (script, json.dumps(lv)),
             )
             con.executemany(
                 """
-                INSERT INTO cards (id, s, d, due, reps, lapses, st, last, shot)
+                INSERT INTO cards (hz, s, d, due, reps, lapses, st, last, story)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 cards,
@@ -187,45 +156,35 @@ def put_state(payload: object) -> dict:
     return {"ok": True, "cards": len(cards)}
 
 
-def get_state() -> dict:
-    with _lock:
-        con = _connect()
-        try:
-            meta = con.execute(
-                "SELECT v, new_cap, day, new_today, script, lv, extra, maps FROM meta WHERE id = 1"
-            ).fetchone()
-            if not meta:
-                return {
-                    "ok": True,
-                    "backend": "sqlite",
-                    "db": str(DB_PATH),
-                    "empty": True,
-                    "state": None,
-                }
-            rows = con.execute(
-                "SELECT id, s, d, due, reps, lapses, st, last, shot FROM cards"
-            ).fetchall()
-        finally:
-            con.close()
+def _card(s, d, due, reps, lapses, st, last) -> dict:
+    card = {}
+    for k, v in (("s", s), ("d", d), ("due", due), ("reps", reps), ("lapses", lapses), ("st", st), ("last", last)):
+        if v is not None:
+            card[k] = v
+    return card
 
-    v, new_cap, day, new_today, script, lv_raw, extra_raw, maps_raw = meta
+
+def legacy_state() -> dict | None:
+    """Read the v1 shot desk (numeric ids, shot json) if it exists. Never written."""
+    if not LEGACY_PATH.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{LEGACY_PATH}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        meta = con.execute("SELECT script, lv FROM meta WHERE id = 1").fetchone()
+        rows = con.execute("SELECT id, s, d, due, reps, lapses, st, last, shot FROM cards").fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    if not meta or not rows:
+        return None
+    script, lv_raw = meta
     cards = {}
     for cid, s, d, due, reps, lapses, st, last, shot in rows:
-        card = {}
-        if s is not None:
-            card["s"] = s
-        if d is not None:
-            card["d"] = d
-        if due is not None:
-            card["due"] = due
-        if reps is not None:
-            card["reps"] = reps
-        if lapses is not None:
-            card["lapses"] = lapses
-        if st is not None:
-            card["st"] = st
-        if last is not None:
-            card["last"] = last
+        card = _card(s, d, due, reps, lapses, st, last)
         if shot:
             try:
                 card["m"] = json.loads(shot)
@@ -233,28 +192,50 @@ def get_state() -> dict:
                 pass
         cards[str(cid)] = card
     try:
-        maps = json.loads(maps_raw) if maps_raw else None
+        lv = json.loads(lv_raw) if lv_raw else [1]
     except json.JSONDecodeError:
-        maps = None
+        lv = [1]
+    return {"v": 1, "script": "t" if script == "t" else "s", "lv": lv, "c": cards}
+
+
+def get_state() -> dict:
+    with _lock:
+        con = _connect()
+        try:
+            meta = con.execute("SELECT v, script, lv FROM meta WHERE id = 1").fetchone()
+            if not meta:
+                return {
+                    "ok": True,
+                    "backend": "sqlite",
+                    "db": str(DB_PATH),
+                    "empty": True,
+                    "state": None,
+                    "legacy": legacy_state(),
+                }
+            rows = con.execute(
+                "SELECT hz, s, d, due, reps, lapses, st, last, story FROM cards"
+            ).fetchall()
+        finally:
+            con.close()
+
+    v, script, lv_raw = meta
+    cards = {}
+    for hz, s, d, due, reps, lapses, st, last, story in rows:
+        card = _card(s, d, due, reps, lapses, st, last)
+        if story:
+            card["p"] = story
+        cards[hz] = card
+    try:
+        lv = json.loads(lv_raw) if lv_raw else [1]
+    except json.JSONDecodeError:
+        lv = [1]
     state = {
-        "v": int(v),
-        "newCap": int(new_cap),
-        "day": int(day),
-        "newToday": int(new_today),
+        "v": 2,
         "script": "t" if script == "t" else "s",
-        "lv": json.loads(lv_raw) if lv_raw else [1],
-        "x": json.loads(extra_raw) if extra_raw else [],
+        "lv": lv,
         "c": cards,
     }
-    if maps:
-        state["maps"] = maps
-    return {
-        "ok": True,
-        "backend": "sqlite",
-        "db": str(DB_PATH),
-        "empty": False,
-        "state": state,
-    }
+    return {"ok": True, "backend": "sqlite", "db": str(DB_PATH), "empty": False, "state": state}
 
 
 def clear_state() -> None:
@@ -279,8 +260,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, fmt: str, *args) -> None:
-        sys_stderr = __import__("sys").stderr
-        sys_stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def _json(self, code: int, payload: dict) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -297,10 +277,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         route = self._route()
         if route == "/api/health":
-            self._json(
-                200,
-                {"ok": True, "backend": "sqlite", "db": str(DB_PATH), "port": PORT},
-            )
+            self._json(200, {"ok": True, "backend": "sqlite", "db": str(DB_PATH), "port": PORT})
             return
         if route == "/api/state":
             self._json(200, get_state())
@@ -338,7 +315,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> None:
     init_db()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Hanzi Stage http://{HOST}:{PORT}/  db {DB_PATH}", flush=True)
+    print(f"Hanzi Palace http://{HOST}:{PORT}/  db {DB_PATH}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

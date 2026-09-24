@@ -1,131 +1,79 @@
-/** Local SQLite via /api/state. Cookie `stage` is only a one-time migrate source. */
+/** Local SQLite via /api/state. State v2: cards keyed by hanzi, one paragraph each. */
 
-import { unixDay } from './fsrs.js'
-import { compactMaps, readMaps } from './shots.js'
+import { WORDS } from './hsk1.js'
 
-export const COOKIE_NAME = 'stage'
 export const DB_API = '/api/state'
-const MAX_AGE = 63072000 // 2 years
-const BUDGET = 3500 // cookie fallback only
 
 export function emptyState() {
-  return {
-    v: 1,
-    newCap: 7,
-    day: unixDay(),
-    newToday: 0,
-    script: 's',
-    lv: [1],
-    x: [],
-    c: {},
+  return { v: 2, script: 's', lv: [1], c: {} }
+}
+
+function cleanLv(raw) {
+  const lv = Array.isArray(raw) ? raw.map(Number).filter((n) => n >= 1 && n <= 6) : []
+  return lv.length ? [...new Set(lv)].sort((a, b) => a - b) : [1]
+}
+
+function cleanCard(card) {
+  if (!card || typeof card !== 'object') return null
+  const out = {}
+  for (const k of ['s', 'd', 'due', 'reps', 'lapses', 'st', 'last']) {
+    if (card[k] != null && Number.isFinite(Number(card[k]))) out[k] = Number(card[k])
   }
+  if (typeof card.p === 'string' && card.p.trim()) out.p = card.p
+  return out
+}
+
+/** v1 desk: numeric word ids, shot text in m.s[] / m.k. Fold into paragraphs keyed by hanzi. */
+function fromV1(parsed) {
+  const out = emptyState()
+  out.script = parsed.script === 't' ? 't' : 's'
+  out.lv = cleanLv(parsed.lv)
+  for (const [key, card] of Object.entries(parsed.c || {})) {
+    const w = WORDS[Number(key)]
+    if (!w || !card) continue
+    const next = cleanCard(card) || {}
+    const m = card.m
+    if (m) {
+      const s = Array.isArray(m) ? m : (m.s || [])
+      const k = (Array.isArray(m) ? m.k : m.k) || ''
+      const para = [...s.filter(Boolean), k].filter((t) => t && String(t).trim()).map((t) => String(t).trim()).join('\n\n')
+      if (para) next.p = para
+    }
+    if (Object.keys(next).length) out.c[w.hz] = next
+  }
+  return out
 }
 
 export function normalizeState(parsed) {
-  if (!parsed || parsed.v !== 1 || typeof parsed.c !== 'object' || parsed.c == null) {
+  if (!parsed || typeof parsed !== 'object' || typeof parsed.c !== 'object' || parsed.c == null) {
     throw new Error('Unknown version')
   }
-  return {
-    v: 1,
-    newCap: parsed.newCap || 7,
-    day: parsed.day || unixDay(),
-    newToday: parsed.newToday || 0,
-    script: parsed.script === 't' ? 't' : 's',
-    lv: Array.isArray(parsed.lv) && parsed.lv.length
-      ? parsed.lv.map(Number).filter((n) => n >= 1 && n <= 6)
-      : [1],
-    x: Array.isArray(parsed.x) ? parsed.x.map(Number).filter((n) => n >= 0) : [],
-    maps: compactMaps(readMaps(parsed.maps)),
-    c: parsed.c || {},
+  if (parsed.v === 1) return fromV1(parsed)
+  if (parsed.v !== 2) throw new Error('Unknown version')
+  const out = emptyState()
+  out.script = parsed.script === 't' ? 't' : 's'
+  out.lv = cleanLv(parsed.lv)
+  for (const [hz, card] of Object.entries(parsed.c)) {
+    const next = cleanCard(card)
+    if (next && Object.keys(next).length) out.c[hz] = next
   }
+  return out
 }
 
-export function cookieHasProgress(state) {
+export function hasProgress(state) {
   if (!state) return false
   if (state.c && Object.keys(state.c).length) return true
   if (state.script === 't') return true
-  if (state.newCap && state.newCap !== 7) return true
-  if (Array.isArray(state.lv) && (state.lv.length !== 1 || Number(state.lv[0]) !== 1)) return true
-  if (Array.isArray(state.x) && state.x.length) return true
-  if (compactMaps(readMaps(state.maps))) return true
-  return false
-}
-
-export function readCookie() {
-  if (typeof document === 'undefined') return emptyState()
-  const parts = document.cookie.split(';')
-  for (const p of parts) {
-    const i = p.indexOf('=')
-    if (i < 0) continue
-    const k = p.slice(0, i).trim()
-    if (k !== COOKIE_NAME) continue
-    try {
-      const parsed = JSON.parse(decodeURIComponent(p.slice(i + 1).trim()))
-      return normalizeState(parsed)
-    } catch {
-      return emptyState()
-    }
-  }
-  return emptyState()
-}
-
-function serialize(state) {
-  const maps = compactMaps(state.maps)
-  const body = { ...state }
-  if (maps) body.maps = maps
-  else delete body.maps
-  return encodeURIComponent(JSON.stringify(body))
-}
-
-function trimShots(state) {
-  const next = { ...state, c: { ...state.c } }
-  const ids = Object.keys(next.c)
-  ids.sort((a, b) => {
-    const ma = JSON.stringify(next.c[a].m || '').length
-    const mb = JSON.stringify(next.c[b].m || '').length
-    return mb - ma
-  })
-  for (const id of ids) {
-    if (serialize(next).length <= BUDGET) break
-    if (next.c[id].m) {
-      const copy = { ...next.c[id] }
-      delete copy.m
-      next.c[id] = copy
-    }
-  }
-  return next
-}
-
-export function writeCookie(state) {
-  if (typeof document === 'undefined') return { ok: true, trimmed: false, backend: 'cookie' }
-  let payload = state
-  let trimmed = false
-  if (serialize(payload).length > BUDGET) {
-    payload = trimShots(payload)
-    trimmed = true
-  }
-  const value = serialize(payload)
-  document.cookie = `${COOKIE_NAME}=${value};Max-Age=${MAX_AGE};Path=/;SameSite=Strict`
-  return { ok: value.length <= BUDGET, trimmed, backend: 'cookie' }
-}
-
-export function clearCookie() {
-  if (typeof document === 'undefined') return
-  document.cookie = `${COOKIE_NAME}=;Max-Age=0;Path=/;SameSite=Strict`
-}
-
-export function rollover(state, today = unixDay()) {
-  if (state.day === today) return state
-  return { ...state, day: today, newToday: 0 }
+  const lv = cleanLv(state.lv)
+  return lv.length !== 1 || lv[0] !== 1
 }
 
 export function exportPayload(state) {
   return {
-    app: 'hanzi-stage',
+    app: 'hanzi-palace',
     dataset: 'hsk2.0',
     exportedAt: new Date().toISOString(),
     storage: 'sqlite',
-    cookieName: COOKIE_NAME,
     state,
   }
 }
@@ -155,47 +103,29 @@ export async function writeState(state) {
     try { detail = (await res.json()).error || detail } catch { /* keep */ }
     throw new Error(detail)
   }
-  clearCookie()
-  return { ok: true, trimmed: false, backend: 'sqlite' }
+  return { ok: true, backend: 'sqlite' }
 }
 
 export async function clearState() {
-  try {
-    await fetch(DB_API, { method: 'DELETE' })
-  } catch {
-    /* cookie clear still runs */
-  }
-  clearCookie()
+  await fetch(DB_API, { method: 'DELETE' })
 }
 
 export async function loadState() {
   const remote = await fetchState()
-  const cookie = readCookie()
   if (remote && remote.empty) {
-    if (cookieHasProgress(cookie)) {
-      await writeState(cookie)
-      clearCookie()
-      return {
-        state: rollover(cookie),
-        backend: 'sqlite',
-        migrated: true,
-        db: remote.db || null,
+    // A v1 desk from the shot-list branch is offered once, then converted here.
+    if (remote.legacy) {
+      try {
+        const migrated = normalizeState(remote.legacy)
+        if (hasProgress(migrated)) {
+          await writeState(migrated)
+          return { state: migrated, backend: 'sqlite', migrated: true, db: remote.db || null }
+        }
+      } catch {
+        /* fall through to empty */
       }
     }
-    clearCookie()
-    return {
-      state: rollover(emptyState()),
-      backend: 'sqlite',
-      migrated: false,
-      db: remote.db || null,
-    }
+    return { state: emptyState(), backend: 'sqlite', migrated: false, db: remote.db || null }
   }
-  const state = normalizeState(remote.state)
-  clearCookie()
-  return {
-    state: rollover(state),
-    backend: 'sqlite',
-    migrated: false,
-    db: remote.db || null,
-  }
+  return { state: normalizeState(remote.state), backend: 'sqlite', migrated: false, db: remote.db || null }
 }

@@ -165,3 +165,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 @media (max-width: 520px) {
   .roster-row { grid-template-columns: 1fr; }
 }
+
+/* palace */
+textarea.story { min-height: 9rem; }
+.story-quote { white-space: pre-wrap; }
+.parts details { margin: 0.35rem 0; }
+.parts summary { cursor: pointer; }
+.list li.locked { opacity: 0.55; cursor: default; }
+.list li { cursor: pointer; }
